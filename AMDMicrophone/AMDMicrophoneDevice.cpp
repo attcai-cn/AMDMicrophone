@@ -27,32 +27,59 @@ void AMDMicrophoneDevice::writel(UInt32 val, UInt32 reg)
     *(volatile UInt32*)(baseAddr + reg - ACP_PHY_BASE_ADDRESS) = val;
 }
 
-void AMDMicrophoneDevice::configDMA()
+bool AMDMicrophoneDevice::configDMA()
 {
-    UInt32 low, high, val;
-
-    val = 0;
+    const IOByteCount totalLength = dmaDescriptor->getLength();
+    const UInt32 expectedPages = (UInt32)((totalLength + ACP_DMA_PAGE_SIZE - 1) / ACP_DMA_PAGE_SIZE);
+    const UInt32 maxPTEOffset = expectedPages * 8;
+    UInt32 pte = 0;
+    IOByteCount offset = 0;
 
     writel(ACP_SRAM_PTE_OFFSET | BIT(31), ACP_AXI2AXI_ATU_BASE_ADDR_GRP_1);
     writel(ACP_PAGE_SIZE_4K_ENABLE, ACP_AXI2AXI_ATU_PAGE_SIZE_GRP_1);
 
-    IOByteCount offset = 0;
-    while (offset < dmaDescriptor->getLength()) {
+    while (offset < totalLength && pte < maxPTEOffset) {
         IOByteCount segmentLength = 0;
         addr64_t address = dmaDescriptor->getPhysicalSegment(offset, &segmentLength);
 
         if (!address || !segmentLength)
             break;
 
-        low = (UInt32)address;
-        high = (UInt32)(address >> 32);
+        /*
+         * A physically contiguous segment can span several 4K pages. The old
+         * code always advanced "offset" by exactly one page, so any segment
+         * larger than 4096 bytes left the trailing pages unmapped in the ACP
+         * ATU - the DMA then wrote into unmapped memory and whole periods went
+         * missing (audible drop-outs). Walk every page of every segment.
+         */
+        IOByteCount done = 0;
+        while (done < segmentLength && pte < maxPTEOffset) {
+            addr64_t pageAddress = address + done;
+            UInt32 low = (UInt32)pageAddress;
+            UInt32 high = (UInt32)(pageAddress >> 32) | (UInt32)BIT(31);
 
-        writel(low, ACP_SCRATCH_REG_0 + val);
-        high |= BIT(31);
-        writel(high, ACP_SCRATCH_REG_0 + val + 4);
-        offset += ACP_DMA_PAGE_SIZE;
-        val += 8;
+            writel(low, ACP_SCRATCH_REG_0 + pte);
+            writel(high, ACP_SCRATCH_REG_0 + pte + 4);
+
+            pte += 8;
+            done += ACP_DMA_PAGE_SIZE;
+        }
+
+        offset += segmentLength;
     }
+
+    UInt32 mappedPages = pte / 8;
+    if (mappedPages < expectedPages) {
+        LOG("ACP DMA page table incomplete: %u/%u pages mapped\n", mappedPages, expectedPages);
+        return false;
+    }
+
+    if (config.debug)
+        LOG("ACP DMA page table: %u pages mapped, hw gain %u, sw gain %u.%u\n",
+            mappedPages, config.hardwareGain, config.softwareGainX10 / 10,
+            config.softwareGainX10 % 10);
+
+    return true;
 }
 
 void AMDMicrophoneDevice::clearDMABuffer()
@@ -68,7 +95,12 @@ void AMDMicrophoneDevice::clearDMABuffer()
 
 void AMDMicrophoneDevice::disableInterrupt()
 {
+    UInt32 val;
+
     writel(ACP_EXT_INTR_STAT_CLEAR_MASK, ACP_EXTERNAL_INTR_STAT);
+    val = readl(ACP_EXTERNAL_INTR_CNTL);
+    val &= ~(UInt32)ACP_PDM_DMA_INTR_MASK;
+    writel(val, ACP_EXTERNAL_INTR_CNTL);
     writel(0x0, ACP_EXTERNAL_INTR_ENB);
 }
 
@@ -78,25 +110,37 @@ void AMDMicrophoneDevice::enableClock()
 
     writel(ACP_PDM_CLK_FREQ_MASK, ACP_WOV_CLK_CTRL);
     val = readl(ACP_WOV_MISC_CTRL);
-    val &= ~ACP_WOV_GAIN_CONTROL;
-    val |= (ACP_WOV_PDM_GAIN << ACP_WOV_GAIN_CONTROL_SHIFT) & ACP_WOV_GAIN_CONTROL;
+    val &= ~(UInt32)ACP_WOV_GAIN_CONTROL;
+    val |= (config.hardwareGain << ACP_WOV_GAIN_CONTROL_SHIFT) & ACP_WOV_GAIN_CONTROL;
     writel(val, ACP_WOV_MISC_CTRL);
 }
 
 void AMDMicrophoneDevice::enableInterrupt()
 {
+    UInt32 val;
+
+    val = readl(ACP_EXTERNAL_INTR_CNTL);
+    val |= (UInt32)ACP_PDM_DMA_INTR_MASK;
+    writel(val, ACP_EXTERNAL_INTR_CNTL);
     writel(0x1, ACP_EXTERNAL_INTR_ENB);
-    writel(ACP_PDM_DMA_INTR_MASK, ACP_EXTERNAL_INTR_CNTL);
 }
 
 UInt64 AMDMicrophoneDevice::getByteCount()
 {
-    UInt32 low, high;
+    UInt32 high, highAgain, low;
 
+    /*
+     * The 64-bit linearposition counter is exposed as two 32-bit MMIO
+     * registers. Reading high/low without checking for a low-word wrap can
+     * produce a bogus byte count once, which shows up as a sudden clock jump.
+     */
     high = readl(ACP_WOV_RX_LINEARPOSITIONCNTR_HIGH);
     low = readl(ACP_WOV_RX_LINEARPOSITIONCNTR_LOW);
+    highAgain = readl(ACP_WOV_RX_LINEARPOSITIONCNTR_HIGH);
+    if (high != highAgain)
+        low = readl(ACP_WOV_RX_LINEARPOSITIONCNTR_LOW);
 
-    return ((UInt64)high << 32) | low;
+    return ((UInt64)highAgain << 32) | low;
 }
 
 UInt64 AMDMicrophoneDevice::getRelativeByteCount()
@@ -142,7 +186,7 @@ IOReturn AMDMicrophoneDevice::powerOn()
 
     val = readl(ACP_PGFSM_STATUS);
     if (val == 0)
-        return val;
+        return kIOReturnSuccess;
 
     if ((val & ACP_PGFSM_STATUS_MASK) != ACP_POWER_ON_IN_PROGRESS)
         writel(ACP_PGFSM_CNTL_POWER_ON_MASK, ACP_PGFSM_CONTROL);
@@ -187,6 +231,20 @@ IOReturn AMDMicrophoneDevice::startDMA()
     UInt32 val;
     UInt32 timeout;
 
+    /*
+     * The ACP linearposition counter is free running. Linux's acp3x-pdm-dma
+     * snapshots it in TRIGGER_START, *before* ACP_WOV_PDM_DMA_ENABLE is
+     * asserted, and treats that value as byte 0 of the ring buffer. Reading it
+     * after the DMA has already started (the old behaviour) leaves a permanent
+     * phase error between getCurrentSampleFrame() and the location the hardware
+     * is actually writing, which is one source of the drop-outs.
+     */
+    dmaStartByteCount = getByteCount();
+    lastLoopIndex = 0;
+    missedLoopCount = 0;
+    interruptCount = 0;
+    dmaRunning = false;
+
     writel(0x1, ACP_WOV_PDM_FIFO_FLUSH);
     enableClock();
     writel(0x1, ACP_WOV_PDM_ENABLE);
@@ -203,8 +261,7 @@ IOReturn AMDMicrophoneDevice::startDMA()
     if (timeout == ACP_COUNTER)
         return kIOReturnTimeout;
 
-    dmaStartByteCount = getByteCount();
-    lastPeriodCount = 0;
+    dmaRunning = true;
     return kIOReturnSuccess;
 }
 
@@ -212,6 +269,8 @@ IOReturn AMDMicrophoneDevice::stopDMA()
 {
     UInt32 val;
     UInt32 timeout;
+
+    dmaRunning = false;
 
     val = readl(ACP_WOV_PDM_DMA_ENABLE);
     if (val & 0x1) {
@@ -232,6 +291,9 @@ IOReturn AMDMicrophoneDevice::stopDMA()
         writel(0x0, ACP_WOV_PDM_ENABLE);
 
     writel(0x1, ACP_WOV_PDM_FIFO_FLUSH);
+
+    if (config.debug)
+        LOG("DMA stopped: %llu IRQs, %llu merged wraps\n", interruptCount, missedLoopCount);
 
     return kIOReturnSuccess;
 }
@@ -281,14 +343,57 @@ void AMDMicrophoneDevice::interruptHandler()
 {
     UInt32 val;
     UInt64 byteCount;
+    UInt64 loopIndex;
 
     val = readl(ACP_EXTERNAL_INTR_STAT);
-    if (val & BIT(ACP_PDM_DMA_STAT)) {
-        writel(BIT(ACP_PDM_DMA_STAT), ACP_EXTERNAL_INTR_STAT);
-        byteCount = getRelativeByteCount();
-        if (byteCount % BUFFER_SIZE == 0)
-            audioEngine->takeTimeStamp();
+    if (!(val & BIT(ACP_PDM_DMA_STAT)))
+        return;
+
+    /* Acknowledge (W1C) before doing any work so a following period is not lost. */
+    writel(BIT(ACP_PDM_DMA_STAT), ACP_EXTERNAL_INTR_STAT);
+
+    if (!dmaRunning || !audioEngine)
+        return;
+
+    byteCount = getRelativeByteCount();
+    loopIndex = byteCount / BUFFER_SIZE;
+    interruptCount++;
+
+    if (loopIndex < lastLoopIndex) {
+        /* Counter went backwards (DMA restart/resume) - resynchronise quietly. */
+        lastLoopIndex = loopIndex;
+        return;
     }
+
+    if (loopIndex == lastLoopIndex)
+        return;
+
+    /*
+     * IOAudioEngine expects exactly one takeTimeStamp() per ring buffer wrap:
+     * it increments fCurrentLoopCount and records fLastLoopTime, which is the
+     * basis of the whole CoreAudio timeline.
+     *
+     * The original code tested "byteCount % BUFFER_SIZE == 0". The byte counter
+     * has already advanced past the watermark by the time the ISR reads it, so
+     * that exact equality almost never became true - the timestamp froze and
+     * CoreAudio repeatedly underran the input stream (the "stuttering").
+     * Compare wrap *counts* instead, and catch up if an IRQ was coalesced.
+     */
+    UInt64 skipped = loopIndex - lastLoopIndex;
+    if (skipped > 1) {
+        missedLoopCount += skipped - 1;
+        if (config.debug)
+            LOG("coalesced IRQ: %llu wraps\n", skipped);
+    }
+
+    UInt64 stamps = skipped;
+    if (stamps > ACP_MAX_LOOP_CATCHUP)
+        stamps = ACP_MAX_LOOP_CATCHUP;
+
+    for (UInt64 index = 0; index < stamps; index++)
+        audioEngine->takeTimeStamp();
+
+    lastLoopIndex = loopIndex;
 }
 
 void AMDMicrophoneDevice::interruptOccurred(OSObject* owner, IOInterruptEventSource* src, int intCount)
@@ -302,6 +407,8 @@ void AMDMicrophoneDevice::interruptOccurred(OSObject* owner, IOInterruptEventSou
 IOService* AMDMicrophoneDevice::probe(IOService* provider, SInt32* score)
 {
     pciDevice = OSDynamicCast(IOPCIDevice, provider);
+    if (!pciDevice)
+        return NULL;
 
     UInt8 revisionId = pciDevice->configRead8(kIOPCIConfigRevisionID);
 
@@ -324,6 +431,9 @@ bool AMDMicrophoneDevice::initHardware(IOService* provider)
         goto Done;
     }
 
+    /* DeviceProperties / IORegistry tuning knobs (see AMDMicrophoneCommon.hpp). */
+    config = AMDMicReadConfig(provider);
+
     setDeviceName("AMD Digital Microphone");
     setDeviceShortName("AMDMicrophone");
     setManufacturerName("AMD");
@@ -341,7 +451,14 @@ bool AMDMicrophoneDevice::initHardware(IOService* provider)
     if (!baseAddr)
         goto Done;
 
-    dmaDescriptor = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionIn, BUFFER_SIZE);
+    /*
+     * Force page alignment: the ACP ATU is a 4K page table, so every PTE must
+     * point at a page-aligned physical address. This also makes the segment
+     * walk in configDMA() unambiguous.
+     */
+    dmaDescriptor = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionIn, BUFFER_SIZE, ACP_DMA_PAGE_SIZE
+    );
     if (!dmaDescriptor)
         goto Done;
     if (dmaDescriptor->prepare(kIODirectionIn) != kIOReturnSuccess)
@@ -359,6 +476,8 @@ bool AMDMicrophoneDevice::initHardware(IOService* provider)
         provider,
         findMSIInterruptTypeIndex()
     );
+    if (!irqEventSource)
+        goto Done;
     if (workLoop->addEventSource(irqEventSource) != kIOReturnSuccess)
         goto Done;
 
@@ -376,7 +495,8 @@ bool AMDMicrophoneDevice::initHardware(IOService* provider)
 
     writel(0x3, ACP_CLKMUX_SEL);
 
-    configDMA();
+    if (!configDMA())
+        goto Done;
 
     result = true;
 
@@ -389,19 +509,29 @@ Done:
 
 void AMDMicrophoneDevice::stop(IOService* provider)
 {
-    irqEventSource->disable();
-    reset();
+    dmaRunning = false;
 
-    writel(0x0, ACP_CLKMUX_SEL);
-    writel(0x0, ACP_CONTROL);
+    if (irqEventSource)
+        irqEventSource->disable();
+
+    if (baseAddr) {
+        reset();
+        writel(0x0, ACP_CLKMUX_SEL);
+        writel(0x0, ACP_CONTROL);
+    }
+
+    super::stop(provider);
 }
 
 void AMDMicrophoneDevice::free()
 {
+    dmaRunning = false;
+
     if (baseAddrMap) {
         baseAddrMap->release();
         baseAddrMap = NULL;
     }
+    baseAddr = 0;
 
     if (dmaDescriptor) {
         if (dmaPrepared) {

@@ -22,19 +22,29 @@
 #define PERIOD_FRAMES (PERIOD_SIZE / FRAME_SIZE)
 #define NUM_FRAMES   (BUFFER_SIZE / FRAME_SIZE)
 #define MAX_VOLUME   100
-#define INPUT_SOFTWARE_GAIN 3.0f
-#define INPUT_EXPANDER_THRESHOLD 0.018f
-#define INPUT_EXPANDER_FLOOR 0.18f
-#define INPUT_EXPANDER_ATTACK 0.05f
-#define INPUT_EXPANDER_RELEASE 0.001f
-#define STARTUP_FADE_FRAMES (SAMPLE_RATE / 2)
+
+/*
+ * The old DSP chain was the main reason the microphone sounded quiet:
+ *  - a 500 ms fade-in restarted on every engine start,
+ *  - an aggressive downward expander (floor 0.18, 20 ms release) that kept
+ *    speech tails and consonants ~15 dB down,
+ *  - a fixed 3.0x software gain with no way to tune it.
+ * Gain now comes from the device properties (see AMDMicrophoneCommon.hpp);
+ * the expander is off by default and, when enabled, is much gentler.
+ */
+#define STARTUP_FADE_FRAMES (SAMPLE_RATE / 100)
+#define INPUT_EXPANDER_ENVELOPE_COEFF 0.999f
+#define INPUT_EXPANDER_THRESHOLD 0.006f
+#define INPUT_EXPANDER_FLOOR 0.65f
+#define INPUT_EXPANDER_ATTACK 0.010f
+#define INPUT_EXPANDER_RELEASE 0.0005f
 
 class AMDMicrophoneDevice;
 
 class AMDMicrophoneEngine : public IOAudioEngine {
     OSDeclareDefaultStructors(AMDMicrophoneEngine);
 
-    AMDMicrophoneDevice* audioDevice;
+    AMDMicrophoneDevice* audioDevice = nullptr;
     UInt32 volume = MAX_VOLUME;
     UInt32 startupFadeFrame = STARTUP_FADE_FRAMES;
     float expanderEnvelope = 0.0f;
@@ -58,7 +68,7 @@ public:
     IOReturn convertInputSamples(
         const void* sampleBuf, void* destBuf, UInt32 firstSampleFrame, UInt32 numSampleFrames,
         const IOAudioStreamFormat* streamFormat, IOAudioStream* audioStream
-    );
+    ) override;
     UInt32 getCurrentSampleFrame() override;
     IOReturn performAudioEngineStart() override;
     IOReturn performAudioEngineStop() override;

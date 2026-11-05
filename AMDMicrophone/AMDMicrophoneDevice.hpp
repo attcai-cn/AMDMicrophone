@@ -10,6 +10,8 @@
 
 #include <IOKit/audio/IOAudioDevice.h>
 
+#include "AMDMicrophoneCommon.hpp"
+
 #define ACP_PHY_BASE_ADDRESS               0x1240000
 #define ACP_AXI2AXI_ATU_PAGE_SIZE_GRP_1    0x1240C00
 #define ACP_AXI2AXI_ATU_BASE_ADDR_GRP_1    0x1240C04
@@ -46,7 +48,8 @@
 #define ACP_SOFT_RESET_SOFTRESET_AUDDONE_MASK 0x10001
 #define ACP_WOV_GAIN_CONTROL                  0x18
 #define ACP_WOV_GAIN_CONTROL_SHIFT            0x3
-#define ACP_WOV_PDM_GAIN                      0x2
+/* Linux acp3x-pdm-dma uses pdm_gain = 3 by default; 0x2 was one step too low. */
+#define ACP_WOV_PDM_GAIN                      0x3
 
 #define ACP_COUNTER               20000
 #define ACP_DMA_PAGE_SIZE         4096
@@ -58,6 +61,9 @@
 #define ACP_POWER_ON_IN_PROGRESS  0x1
 #define ACP_POWERED_OFF           0x2
 #define ACP_SRAM_PTE_OFFSET       0x2050000
+
+/* Cap the amount of catch-up timestamps so a stuck IRQ cannot stall the work loop. */
+#define ACP_MAX_LOOP_CATCHUP 64
 
 #define BIT(n)      (1UL << (n))
 #define cpu_relax() asm volatile("rep; nop")
@@ -71,20 +77,27 @@ class AMDMicrophoneDevice : public IOAudioDevice {
 
     friend class AMDMicrophoneEngine;
 
-    AMDMicrophoneEngine* audioEngine;
-    IOInterruptEventSource* irqEventSource;
-    IOPCIDevice* pciDevice;
-    IOMemoryMap* baseAddrMap;
-    IOVirtualAddress baseAddr;
-    IOBufferMemoryDescriptor* dmaDescriptor;
+    AMDMicrophoneEngine* audioEngine = nullptr;
+    IOInterruptEventSource* irqEventSource = nullptr;
+    IOPCIDevice* pciDevice = nullptr;
+    IOMemoryMap* baseAddrMap = nullptr;
+    IOVirtualAddress baseAddr = 0;
+    IOBufferMemoryDescriptor* dmaDescriptor = nullptr;
+
+    AMDMicrophoneConfig config = {};
+
     UInt64 dmaStartByteCount = 0;
-    UInt64 lastPeriodCount = 0;
+    /* Number of completed ring buffer wraps, tracked by byte count / BUFFER_SIZE. */
+    UInt64 lastLoopIndex = 0;
+    UInt64 missedLoopCount = 0;
+    UInt64 interruptCount = 0;
     bool dmaPrepared = false;
+    bool dmaRunning = false;
 
     UInt32 readl(UInt32 reg);
     void writel(UInt32 val, UInt32 reg);
 
-    void configDMA();
+    bool configDMA();
     void clearDMABuffer();
     void disableInterrupt();
     void enableClock();
