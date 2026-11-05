@@ -85,14 +85,28 @@ If your laptop uses High Definition Audio, microphone should work since [AppleAL
 
 ### 构建
 
-需要完整 Xcode 16 + macOS 15 SDK（仅装 CommandLineTools 不能构建 kext）：
+**只需 Command Line Tools，无需完整 Xcode.app。** `xcodebuild` 只是 `.xcodeproj` 的解释器；真正的编译、链接、打包分别由 `clang++`、`ld -kext`、`plutil` 和 `codesign` 完成，CLT 全部提供。内核头文件来自仓库内的 `MacKernelSDK`，本来就不绑定 Xcode 版本。
+
+推荐直接跑仓库根目录的 `build.sh`（把 Xcode kext target 的编译参数、`ld -kext -lkmod`、`GENERATE_INFOPLIST_FILE` 的 plist 展开、ad-hoc 签名都显式复刻了一遍）：
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init MacKernelSDK
+./build.sh
+```
+
+若已装完整 Xcode，也可以继续用原工程：
+
+```bash
 xcodebuild -project AMDMicrophone.xcodeproj -scheme AMDMicrophone -configuration Release SYMROOT=$PWD/build
 ```
 
-产物为 `build/Release/AMDMicrophone.kext`。
+两种方式产物都是 `build/Release/AMDMicrophone.kext`（ad-hoc 签名）。静态检查 KPI 依赖：
+
+```bash
+kmutil libraries -p build/Release/AMDMicrophone.kext -z
+```
+
+注意 Sequoia 上 `kextutil -n` 已被移除（`-n is not a supported kmutil mode`）。ad-hoc 签名的 kext 需要放宽 SIP 才能加载，正式分发需 Developer ID 签名。
 
 ### 在 Sequoia 上安装
 
