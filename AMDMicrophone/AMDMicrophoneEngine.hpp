@@ -30,12 +30,16 @@
  *    speech tails and consonants ~15 dB down,
  *  - a fixed 3.0x software gain with no way to tune it.
  * Gain now comes from the device properties (see AMDMicrophoneCommon.hpp);
- * the expander is off by default and, when enabled, is much gentler.
+ * the expander is off by default and its floor/threshold are tuneable too.
+ *
+ * The higher gain makes the PDM noise floor audible, so a first-order
+ * high-pass (~38 Hz at 48 kHz) strips DC offset and rumble before any gain.
+ * Without it the DC offset also holds the gate's envelope detector open,
+ * which is why a gate alone never silenced the hiss.
  */
 #define STARTUP_FADE_FRAMES (SAMPLE_RATE / 100)
+#define INPUT_DC_BLOCK_COEFF 0.995f
 #define INPUT_EXPANDER_ENVELOPE_COEFF 0.999f
-#define INPUT_EXPANDER_THRESHOLD 0.006f
-#define INPUT_EXPANDER_FLOOR 0.65f
 #define INPUT_EXPANDER_ATTACK 0.010f
 #define INPUT_EXPANDER_RELEASE 0.0005f
 
@@ -49,6 +53,9 @@ class AMDMicrophoneEngine : public IOAudioEngine {
     UInt32 startupFadeFrame = STARTUP_FADE_FRAMES;
     float expanderEnvelope = 0.0f;
     float expanderGain = 1.0f;
+    /* Per-channel high-pass state, indexed by hardware channel (left/right). */
+    float dcPrevX[NUM_CHANNELS] = {};
+    float dcPrevY[NUM_CHANNELS] = {};
 
     bool createControls();
     IOAudioStream* createNewAudioStream(

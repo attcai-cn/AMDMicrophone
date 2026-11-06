@@ -183,6 +183,8 @@ IOReturn AMDMicrophoneEngine::convertInputSamples(
     const AMDMicrophoneConfig& config = audioDevice->config;
     const float softwareGain = (float)config.softwareGainX10 * 0.1f;
     const float controlGain = (float)volume / (float)MAX_VOLUME;
+    const float gateThreshold = (float)config.gateThresholdX1000 * 0.001f;
+    const float gateFloor = (float)config.gateFloorPercent * 0.01f;
 
     /* The ACP always writes two S32_LE words per frame, independent of the
      * channel count CoreAudio negotiated, so stride on the hardware layout. */
@@ -192,6 +194,20 @@ IOReturn AMDMicrophoneEngine::convertInputSamples(
     for (UInt32 frame = 0; frame < numSampleFrames; frame++) {
         float left = (float)inputBuf32[0] / (float)INT32_MAX;
         float right = (float)inputBuf32[1] / (float)INT32_MAX;
+
+        /* H(z) = R * (1 - z^-1) / (1 - R * z^-1): unity above ~40 Hz, zero at DC. */
+        if (config.dcBlock) {
+            float x = left;
+            left = INPUT_DC_BLOCK_COEFF * (dcPrevY[0] + x - dcPrevX[0]);
+            dcPrevX[0] = x;
+            dcPrevY[0] = left;
+
+            x = right;
+            right = INPUT_DC_BLOCK_COEFF * (dcPrevY[1] + x - dcPrevX[1]);
+            dcPrevX[1] = x;
+            dcPrevY[1] = right;
+        }
+
         float mono;
 
         switch (config.mixMode) {
@@ -213,9 +229,11 @@ IOReturn AMDMicrophoneEngine::convertInputSamples(
         float finalGain = controlGain * softwareGain;
 
         /*
-         * Optional, gentle downward expander. Disabled by default: the old
-         * always-on gate (floor 0.18, slow release) chopped speech tails and
-         * made the signal sound both quiet and choppy.
+         * Downward expander for the quiet passages. Off by default because an
+         * aggressive floor chops speech tails, but floor and threshold are
+         * injectable so the noise floor can be tuned per machine. It runs on
+         * the DC-free signal, otherwise a PDM DC offset holds the envelope
+         * open and the gate never closes.
          */
         if (config.noiseGate) {
             float level = mono * controlGain;
@@ -226,11 +244,11 @@ IOReturn AMDMicrophoneEngine::convertInputSamples(
                 + level * (1.0f - INPUT_EXPANDER_ENVELOPE_COEFF);
 
             float targetGain;
-            if (expanderEnvelope >= INPUT_EXPANDER_THRESHOLD) {
+            if (expanderEnvelope >= gateThreshold) {
                 targetGain = 1.0f;
             } else {
-                targetGain = INPUT_EXPANDER_FLOOR
-                    + (1.0f - INPUT_EXPANDER_FLOOR) * expanderEnvelope / INPUT_EXPANDER_THRESHOLD;
+                targetGain = gateFloor
+                    + (1.0f - gateFloor) * expanderEnvelope / gateThreshold;
             }
 
             float coefficient = (targetGain > expanderGain)
@@ -282,6 +300,10 @@ IOReturn AMDMicrophoneEngine::performAudioEngineStart()
     startupFadeFrame = 0;
     expanderEnvelope = 0.0f;
     expanderGain = 1.0f;
+    for (UInt32 ch = 0; ch < NUM_CHANNELS; ch++) {
+        dcPrevX[ch] = 0.0f;
+        dcPrevY[ch] = 0.0f;
+    }
 
     audioDevice->clearDMABuffer();
     audioDevice->initRingBuffer(ACP_MEM_WINDOW_START, BUFFER_SIZE, PERIOD_SIZE);

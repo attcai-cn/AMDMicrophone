@@ -75,9 +75,11 @@ bool AMDMicrophoneDevice::configDMA()
     }
 
     if (config.debug)
-        LOG("ACP DMA page table: %u pages mapped, hw gain %u, sw gain %u.%u\n",
+        LOG("ACP DMA page table: %u pages mapped, hw gain %u, sw gain %u.%u, "
+            "mix %u, dc-block %u, gate %u (floor %u%%, threshold 0.%03u)\n",
             mappedPages, config.hardwareGain, config.softwareGainX10 / 10,
-            config.softwareGainX10 % 10);
+            config.softwareGainX10 % 10, config.mixMode, (UInt32)config.dcBlock,
+            (UInt32)config.noiseGate, config.gateFloorPercent, config.gateThresholdX1000);
 
     return true;
 }

@@ -18,6 +18,10 @@ if [ ! -d "$MKS" ]; then
     exit 1
 fi
 
+# Rebuild the bundle from scratch. Otherwise the outer .kext directory keeps
+# its original mtime and Finder makes it look like nothing was rebuilt; stale
+# _CodeSignature/CodeResources could also survive a changed binary.
+rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OBJ"
 
 # Xcode's kext target uses these flags with KERNEL_FRAMEWORK_HEADERS pointing
@@ -37,13 +41,29 @@ for src in AMDMicrophone/AMDMicrophoneDevice.cpp AMDMicrophone/AMDMicrophoneEngi
     clang++ "${CXXFLAGS[@]}" -c "$src" -o "$obj"
 done
 
+# Xcode's Kernel Extension target generates a kmod_info stub automatically.
+# Without it _kmod_info stays undefined and kmutil refuses to place the kext
+# in a kernel collection ("kexts must have a _kmod_info symbol").
+CFLAGS=(
+    -std=gnu11
+    -target "x86_64-apple-macosx$DEPLOY"
+    -mkernel -fno-builtin -nostdinc
+    -isystem "$MKS" -I AMDMicrophone
+    -D__KERNEL__ -DKERNEL -DAPPLE
+    -Wno-\#warnings
+)
+echo "CC  AMDMicrophone/AMDMicrophoneKmodInfo.c"
+clang "${CFLAGS[@]}" -c AMDMicrophone/AMDMicrophoneKmodInfo.c \
+    -o "$OBJ/AMDMicrophoneKmodInfo.o"
+
 echo "LD  $OUT/Contents/MacOS/AMDMicrophone"
 ld -kext -arch x86_64 \
     -platform_version macos "$DEPLOY" "$SDKVER" \
     -syslibroot "$SDK" \
     -o "$OUT/Contents/MacOS/AMDMicrophone" \
     "$OBJ/AMDMicrophoneDevice.o" "$OBJ/AMDMicrophoneEngine.o" \
-    -lkmod
+    "$OBJ/AMDMicrophoneKmodInfo.o" \
+    -lkmod -lkmodc++
 
 # GENERATE_INFOPLIST_FILE=YES in the .pbxproj expands $(PRODUCT_BUNDLE_IDENTIFIER)
 # and injects the CFBundle* keys. Do the same here.
@@ -81,5 +101,11 @@ plutil -lint "$OUT/Contents/Info.plist"
 codesign -s - --force --deep "$OUT" >/dev/null 2>&1 || \
     echo "warning: ad-hoc codesign failed (kext may still load with SIP disabled)" >&2
 
+BIN="$OUT/Contents/MacOS/AMDMicrophone"
 echo "Built: $OUT"
-file "$OUT/Contents/MacOS/AMDMicrophone"
+file "$BIN"
+echo "  $(stat -f '%z bytes, modified %Sm' -t '%Y-%m-%d %H:%M:%S' "$BIN")"
+echo "  sha256: $(shasum -a 256 "$BIN" | awk '{print $1}')"
+if ! nm -g "$BIN" | grep -q ' _kmod_info$'; then
+    echo "warning: _kmod_info is missing; kmutil will refuse this kext" >&2
+fi

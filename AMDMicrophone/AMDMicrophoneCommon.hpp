@@ -20,11 +20,14 @@
  * matches), so gain / channel routing can be adjusted without rebuilding
  * the kext. See README.md for the recommended values.
  */
-#define kAMDMicHWGainKey     "amdmic-hw-gain"
-#define kAMDMicSWGainKey     "amdmic-sw-gain"
-#define kAMDMicMixKey        "amdmic-mix"
-#define kAMDMicNoiseGateKey  "amdmic-noise-gate"
-#define kAMDMicDebugKey      "amdmic-debug"
+#define kAMDMicHWGainKey          "amdmic-hw-gain"
+#define kAMDMicSWGainKey          "amdmic-sw-gain"
+#define kAMDMicMixKey             "amdmic-mix"
+#define kAMDMicNoiseGateKey       "amdmic-noise-gate"
+#define kAMDMicDCBlockKey         "amdmic-dc-block"
+#define kAMDMicGateFloorKey       "amdmic-gate-floor"
+#define kAMDMicGateThresholdKey   "amdmic-gate-threshold"
+#define kAMDMicDebugKey           "amdmic-debug"
 
 #define kAMDMicMixAverage 0
 #define kAMDMicMixLeft    1
@@ -39,11 +42,26 @@
 #define kAMDMicDefaultMix       kAMDMicMixAverage
 #define kAMDMicDefaultNoiseGate 0
 
+/*
+ * Noise-floor tuning. A PDM stream carries a small DC offset and some
+ * low-frequency rumble; amplifying it 4.5x makes the hiss very obvious and,
+ * worse, keeps the gate's envelope detector permanently open. A ~38 Hz
+ * high-pass removes that before any gain is applied.
+ */
+#define kAMDMicDefaultDCBlock              1
+/* Percent of signal kept while the gate considers the input silent. */
+#define kAMDMicDefaultGateFloorPercent     20
+/* Threshold in thousandths of full scale: 6 -> 0.006 (matches the old gate). */
+#define kAMDMicDefaultGateThresholdX1000  6
+
 struct AMDMicrophoneConfig {
     UInt32 hardwareGain;
     UInt32 softwareGainX10;
     UInt32 mixMode;
     bool   noiseGate;
+    bool   dcBlock;
+    UInt32 gateFloorPercent;
+    UInt32 gateThresholdX1000;
     bool   debug;
 };
 
@@ -82,6 +100,15 @@ static inline AMDMicrophoneConfig AMDMicReadConfig(IOService* provider)
     config.noiseGate = AMDMicGetProperty(
         provider, kAMDMicNoiseGateKey, kAMDMicDefaultNoiseGate, 0, 1
     ) != 0;
+    config.dcBlock = AMDMicGetProperty(
+        provider, kAMDMicDCBlockKey, kAMDMicDefaultDCBlock, 0, 1
+    ) != 0;
+    config.gateFloorPercent = AMDMicGetProperty(
+        provider, kAMDMicGateFloorKey, kAMDMicDefaultGateFloorPercent, 0, 100
+    );
+    config.gateThresholdX1000 = AMDMicGetProperty(
+        provider, kAMDMicGateThresholdKey, kAMDMicDefaultGateThresholdX1000, 1, 500
+    );
     config.debug = AMDMicGetProperty(
         provider, kAMDMicDebugKey, 0, 0, 1
     ) != 0;
