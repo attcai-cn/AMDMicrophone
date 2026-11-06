@@ -116,36 +116,9 @@ kmutil libraries -p build/Release/AMDMicrophone.kext -z
 
 ```bash
 sudo cp -R build/Release/AMDMicrophone.kext /Library/Extensions/
-sudo chown -R root:wheel /Library/Extensions/AMDMicrophone.kext
-sudo chmod -R 755 /Library/Extensions/AMDMicrophone.kext
-sudo kmutil rebuild        # 只重建 Auxiliary KC，见下方警告
-sudo reboot
 ```
 
-若 `/Library/Extensions` 里装的是早期构建产物（缺 `_kmod_info`），必须先重新 `./build.sh` 再执行上面的 `cp -R` 替换，否则 `kmutil load` 会直接报 Code=31。
-
-**不要用 `kmutil create --update-all` 或 `kmutil install --update-all`。** 在黑苹果 / 未装 KDK 的机器上，全量重建会去解析整个 System KC 的依赖链，因缺少 KDK 提供的 `com.apple.kpi.private` 和 `kernel.kasan` / `kernel.development` / `kernel.debug` / `kernel.research` 变体内核而报 `KMErrorDomain Code=71`（典型报错是 `IOHIDSystem` 或 `AppleUSBHostPlatformProperties` 的依赖找不到，与本项目无关）。`--allow-missing-kdk` 只是跳过「KDK 是否存在」的检查，并不会补上这些文件，因此必然失败。`kmutil rebuild` 只动 `/Library/Extensions` 对应的 `AuxiliaryKernelExtensions.kc`，绕开整条系统依赖链。若确实需要全量重建，必须先装匹配系统 build（如 `24H232`）的 Kernel Debug Kit，但重建 System/Boot KC 在黑苹果上有无法开机的风险。
-
-只想验证 kext 能否加载、不重建任何缓存时：
-
-```bash
-sudo kmutil load -p /Library/Extensions/AMDMicrophone.kext -v --no-authorization
-kmutil print-diagnostics -p /Library/Extensions/AMDMicrophone.kext
-```
-
-**`cp` 之后不会有任何系统提示。** macOS 不监视 `/Library/Extensions`；签名校验、用户审批、把 kext 编入 `AuxiliaryKernelExtensions.kc` 都发生在 `kmutil rebuild`（或 `kmutil load`）和重启时。可比对时间确认缓存确实重建过：
-
-```bash
-ls -l /Library/KernelCollections/AuxiliaryKernelExtensions.kc
-```
-
-若该文件的修改时间早于拷贝时间，说明缓存没重建，kext 一定没加载。
-
-「系统设置 > 隐私与安全性 > 允许」的弹窗**只在 SIP 完整开启、kext 有有效 Developer ID 签名但尚未获用户批准时**才出现。ad-hoc 签名 + 已禁用 Kext Signing 会跳过这一流程，因此没有弹窗、系统设置里也没有允许按钮，属于正常现象（上文 Installation 第 4 步的提示不适用于此配置）。反过来，一旦 SIP 恢复完整开启，ad-hoc 签名会被静默拒绝，只在 `syspolicyd` 日志里留记录。
-
-**ad-hoc 签名还有第二道关卡**：`codesign --verify --strict` 会报 `valid on disk / satisfies its Designated Requirement`，但 `kmutil print-diagnostics` 仍可能报 `Authenticating extension failed: Bad code signature`——kernel manager 在编入/加载时要求带开发者身份的 CMS 签名，ad-hoc（无 `TeamIdentifier`）不一定被接受，即使 SIP 的 Kext Signing 已禁用。诊断里 `Dependencies: OK` 说明依赖链没问题，此时需要用真实代码签名证书重签（对照 `/Library/Extensions` 里其它第三方 kext 通常都带 `TeamIdentifier`）。
-
-排查时注意 `kmutil` 的错误写向 stderr，`... | grep amd` 过滤不到它，要写成 `... 2>&1 | grep -i amd`。
+按弹出的提示操作。
 
 重启后验证：
 
