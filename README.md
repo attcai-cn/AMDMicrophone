@@ -85,8 +85,6 @@ If your laptop uses High Definition Audio, microphone should work since [AppleAL
 
 ### 构建
 
-**只需 Command Line Tools，无需完整 Xcode.app。** `xcodebuild` 只是 `.xcodeproj` 的解释器；真正的编译、链接、打包分别由 `clang++`、`ld -kext`、`plutil` 和 `codesign` 完成，CLT 全部提供。内核头文件来自仓库内的 `MacKernelSDK`，本来就不绑定 Xcode 版本。
-
 推荐直接跑仓库根目录的 `build.sh`（把 Xcode kext target 的编译参数、`ld -kext -lkmod -lkmodc++`、**自动生成的 `kmod_info` 桩**、`GENERATE_INFOPLIST_FILE` 的 plist 展开、ad-hoc 签名都显式复刻了一遍）：
 
 ```bash
@@ -204,6 +202,6 @@ log show --last 5m --info --predicate 'eventMessage CONTAINS "AMD Digital Microp
 
 ### 已知限制
 
-- 仍只支持 Renoir（revision `0x1`）的 ACP3x，ACP6x 及其它变体未适配。
+- 支持 Renoir、Cezanne（revision `0x1`）的 ACP3x，ACP6x 及其它变体未适配。
 - 基于已废弃的 `IOAudioFamily`，仅 x86_64 可用；Apple Silicon 需要迁移到 AudioDriverKit / AudioServerPlugIn，属于后续工作。
 - 装机前请备份当前可正常使用的旧版 kext，以便快速回滚。
